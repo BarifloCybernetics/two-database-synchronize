@@ -1,0 +1,77 @@
+# ==============================================================================
+# Alertmanager Configuration - Telegram & Email Notifications
+# ==============================================================================
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: 'smtp.example.com:587'
+  smtp_from: 'alerts@ha-postgres.local'
+  smtp_auth_username: 'alerts@ha-postgres.local'
+  smtp_auth_password: 'smtp_password'
+  smtp_require_tls: false
+
+# Notification routing tree
+route:
+  group_by: ['alertname', 'cluster', 'node']
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 1h
+  receiver: 'telegram-and-email'
+  routes:
+    - match:
+        severity: critical
+      receiver: 'critical-receiver'
+      repeat_interval: 15m
+    - match:
+        severity: warning
+      receiver: 'warning-receiver'
+      repeat_interval: 1h
+
+receivers:
+  - name: 'telegram-and-email'
+    telegram_configs:
+      - bot_token: 'YOUR_TELEGRAM_BOT_TOKEN'
+        chat_id: 123456789
+        send_resolved: true
+        parse_mode: 'HTML'
+        message: |
+          🔥 <b>[PostgreSQL HA Alert] {{ .GroupLabels.alertname }}</b>
+          Status: <b>{{ .Status }}</b>
+          Node: <code>{{ .CommonLabels.node }}</code>
+          Summary: {{ .CommonAnnotations.summary }}
+          Description: {{ .CommonAnnotations.description }}
+    email_configs:
+      - to: 'dba-team@example.com'
+        send_resolved: true
+        headers:
+          Subject: '[PostgreSQL HA Alert] {{ .GroupLabels.alertname }} on {{ .CommonLabels.node }}'
+
+  - name: 'critical-receiver'
+    telegram_configs:
+      - bot_token: 'YOUR_TELEGRAM_BOT_TOKEN'
+        chat_id: 123456789
+        send_resolved: true
+        parse_mode: 'HTML'
+        message: |
+          🚨🚨 <b>[CRITICAL FAILURE] {{ .GroupLabels.alertname }}</b>
+          Node: <code>{{ .CommonLabels.node }}</code>
+          Summary: {{ .CommonAnnotations.summary }}
+          Action Required Immediately!
+    email_configs:
+      - to: 'oncall-dba@example.com'
+        send_resolved: true
+        headers:
+          Subject: '🚨 CRITICAL: {{ .GroupLabels.alertname }} on {{ .CommonLabels.node }}'
+
+  - name: 'warning-receiver'
+    email_configs:
+      - to: 'dba-team@example.com'
+        send_resolved: true
+        headers:
+          Subject: '⚠️ Warning: {{ .GroupLabels.alertname }} on {{ .CommonLabels.node }}'
+
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'node']

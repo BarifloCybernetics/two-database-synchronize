@@ -1,0 +1,83 @@
+# ==============================================================================
+# Docker Compose: Node A Standalone Deployment (Server A / Data Center 1)
+# ==============================================================================
+services:
+
+  postgres-node-a:
+    image: postgres:16-alpine
+    container_name: postgres-node-a
+    hostname: node-a
+    env_file:
+      - ./.env
+    ports:
+      - "${HOST_PORT:-5432}:5432"
+    volumes:
+      - node-a-data:/var/lib/postgresql/data
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ../database/schema:/docker-entrypoint-initdb.d/00-schema:ro
+      - ./init:/docker-entrypoint-initdb.d/10-init:ro
+      - ../backup/node-a:/backups
+      - ./scripts:/scripts:ro
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${POSTGRES_DB:-appdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  postgres-exporter-a:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: postgres-exporter-a
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${REPLICATION_USER:-replicator}:${REPLICATION_PASSWORD:-replicator_secure_pw_123}@postgres-node-a:5432/${POSTGRES_DB:-appdb}?sslmode=disable"
+    ports:
+      - "9187:9187"
+    depends_on:
+      postgres-node-a:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Continuous Auto-Joiner Daemon: Detects Server B and automatically connects replication
+  cluster-auto-join:
+    image: postgres:16-alpine
+    container_name: auto-join-node-a
+    depends_on:
+      postgres-node-a:
+        condition: service_healthy
+    env_file:
+      - ./.env
+    environment:
+      LOCAL_HOST: postgres-node-a
+      LOCAL_PORT: 5432
+    volumes:
+      - ../scripts:/scripts:ro
+    entrypoint: ["/bin/sh", "-c", "sleep 3 && /scripts/auto-cluster-join.sh"]
+    restart: unless-stopped
+
+  # Continuous 1-Minute Reconciliation: Checks parity and syncs ONLY missing data (zero duplicates)
+  reconciliation-service:
+    image: postgres:16-alpine
+    container_name: reconciliation-daemon-node-a
+    depends_on:
+      postgres-node-a:
+        condition: service_healthy
+    env_file:
+      - ./.env
+    environment:
+      NODE_A_HOST: postgres-node-a
+      NODE_A_PORT: 5432
+      NODE_B_HOST: "${REMOTE_STATIC_IP:-node-b}"
+      NODE_B_PORT: "${REMOTE_PORT:-5432}"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-postgres_master_pw}"
+      POSTGRES_DB: "${POSTGRES_DB:-appdb}"
+    volumes:
+      - ../database/reconciliation:/reconciliation:ro
+    entrypoint: ["/bin/sh", "-c", "sleep 15 && /reconciliation/reconcile.sh --daemon 60"]
+    restart: unless-stopped
+
+volumes:
+  node-a-data:

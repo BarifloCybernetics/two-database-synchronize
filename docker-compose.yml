@@ -1,0 +1,219 @@
+# ==============================================================================
+# Docker Compose: Active-Active PostgreSQL Cluster with Monitoring & Alerts
+# ==============================================================================
+services:
+
+  # ----------------------------------------------------------------------------
+  # DATABASE NODE A (Port 5432 on Host)
+  # ----------------------------------------------------------------------------
+  node-a:
+    image: postgres:16-alpine
+    container_name: postgres-node-a
+    hostname: node-a
+    env_file:
+      - ./node-a/.env
+    ports:
+      - "5432:5432"
+    volumes:
+      - node-a-data:/var/lib/postgresql/data
+      - ./node-a/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./node-a/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./database/schema:/docker-entrypoint-initdb.d/00-schema:ro
+      - ./node-a/init:/docker-entrypoint-initdb.d/10-init:ro
+      - ./backup/node-a:/backups
+      - ./node-a/scripts:/scripts:ro
+      - ./scripts:/cluster-scripts:ro
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - pg-cluster-net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # DATABASE NODE B (Port 5433 on Host)
+  # ----------------------------------------------------------------------------
+  node-b:
+    image: postgres:16-alpine
+    container_name: postgres-node-b
+    hostname: node-b
+    env_file:
+      - ./node-b/.env
+    ports:
+      - "5433:5432"
+    volumes:
+      - node-b-data:/var/lib/postgresql/data
+      - ./node-b/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./node-b/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./database/schema:/docker-entrypoint-initdb.d/00-schema:ro
+      - ./node-b/init:/docker-entrypoint-initdb.d/10-init:ro
+      - ./backup/node-b:/backups
+      - ./node-b/scripts:/scripts:ro
+      - ./scripts:/cluster-scripts:ro
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - pg-cluster-net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # REPLICATION BOOTSTRAPPER (Runs setup-replication.sh once nodes are healthy)
+  # ----------------------------------------------------------------------------
+  replication-init:
+    image: postgres:16-alpine
+    container_name: replication-initializer
+    depends_on:
+      node-a:
+        condition: service_healthy
+      node-b:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/scripts:ro
+    entrypoint: ["/bin/sh", "-c", "sleep 3 && NODE_A_HOST=node-a NODE_B_HOST=node-b /scripts/setup-replication.sh"]
+    networks:
+      - pg-cluster-net
+    restart: "no"
+
+  # ----------------------------------------------------------------------------
+  # CONTINUOUS 1-MINUTE RECONCILIATION DAEMON
+  # Checks Node A & Node B every 60s; syncs ONLY missing data with ZERO duplicates
+  # ----------------------------------------------------------------------------
+  reconciliation-service:
+    image: postgres:16-alpine
+    container_name: reconciliation-daemon
+    depends_on:
+      node-a:
+        condition: service_healthy
+      node-b:
+        condition: service_healthy
+    volumes:
+      - ./database/reconciliation:/reconciliation:ro
+      - ./scripts:/scripts:ro
+    environment:
+      NODE_A_HOST: node-a
+      NODE_A_PORT: 5432
+      NODE_B_HOST: node-b
+      NODE_B_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_master_pw
+      POSTGRES_DB: appdb
+    entrypoint: ["/bin/sh", "-c", "sleep 10 && /reconciliation/reconcile.sh --daemon 60"]
+    networks:
+      - pg-cluster-net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # POSTGRES PROMETHEUS EXPORTER (NODE A)
+  # ----------------------------------------------------------------------------
+  postgres-exporter-a:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: postgres-exporter-a
+    environment:
+      DATA_SOURCE_NAME: "postgresql://replicator:replicator_secure_pw_123@node-a:5432/appdb?sslmode=disable"
+    ports:
+      - "9187:9187"
+    depends_on:
+      node-a:
+        condition: service_healthy
+    networks:
+      - pg-cluster-net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # POSTGRES PROMETHEUS EXPORTER (NODE B)
+  # ----------------------------------------------------------------------------
+  postgres-exporter-b:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: postgres-exporter-b
+    environment:
+      DATA_SOURCE_NAME: "postgresql://replicator:replicator_secure_pw_123@node-b:5432/appdb?sslmode=disable"
+    ports:
+      - "9188:9187"
+    depends_on:
+      node-b:
+        condition: service_healthy
+    networks:
+      - pg-cluster-net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # PROMETHEUS TIME-SERIES MONITORING
+  # ----------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - pg-cluster-net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # ALERTMANAGER (TELEGRAM & EMAIL NOTIFICATIONS)
+  # ----------------------------------------------------------------------------
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    networks:
+      - pg-cluster-net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # GRAFANA ANALYTICS & DASHBOARDS
+  # ----------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: false
+    volumes:
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - pg-cluster-net
+    restart: unless-stopped
+
+# ------------------------------------------------------------------------------
+# NETWORKS & VOLUMES
+# ------------------------------------------------------------------------------
+networks:
+  pg-cluster-net:
+    driver: bridge
+
+volumes:
+  node-a-data:
+  node-b-data:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,15 @@
+# ==============================================================================
+# Grafana Dashboards Provider Provisioning
+# ==============================================================================
+apiVersion: 1
+
+providers:
+  - name: 'PostgreSQL Active-Active Dashboards'
+    orgId: 1
+    folder: 'PostgreSQL HA'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

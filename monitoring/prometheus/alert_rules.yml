@@ -1,0 +1,59 @@
+# ==============================================================================
+# Prometheus Alerting Rules - PostgreSQL Cluster
+# ==============================================================================
+groups:
+  - name: postgres_cluster_alerts
+    rules:
+      - alert: PostgreSQLNodeDown
+        expr: pg_up == 0
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL instance {{ $labels.node }} is DOWN"
+          description: "PostgreSQL node {{ $labels.node }} (instance {{ $labels.instance }}) has been unreachable for more than 15 seconds."
+
+      - alert: HighReplicationLagBytes
+        expr: pg_replication_slots_bytes_lost > 10485760
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "High replication lag detected on {{ $labels.node }}"
+          description: "Replication slot {{ $labels.slot }} on {{ $labels.node }} has accumulated {{ $value }} bytes of lag (>10MB)."
+
+      - alert: ReplicationSlotInactive
+        expr: pg_replication_slots_active == 0
+        for: 20s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Replication slot inactive on {{ $labels.node }}"
+          description: "Replication slot {{ $labels.slot }} on node {{ $labels.node }} is inactive. Replication is currently paused or broken."
+
+      - alert: HighConnectionsUtilization
+        expr: (pg_stat_activity_count / 100) > 0.85
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Connection pool near saturation on {{ $labels.node }}"
+          description: "Database connection count on {{ $labels.node }} is exceeding 85% of max_connections limit."
+
+      - alert: DeadlocksDetected
+        expr: increase(pg_stat_database_deadlocks[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Deadlocks occurred on {{ $labels.node }}"
+          description: "Deadlocks were detected on database {{ $labels.datname }} on node {{ $labels.node }}."
+
+      - alert: HighTransactionRollbacks
+        expr: rate(pg_stat_database_xact_rollback[2m]) > 5
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated transaction rollback rate on {{ $labels.node }}"
+          description: "Node {{ $labels.node }} is experiencing more than 5 transaction rollbacks per second."

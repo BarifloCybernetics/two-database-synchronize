@@ -1,0 +1,28 @@
+# Environment variables (template/defaults are in repo)
+*.env.local
+*.env.*.local
+
+# Persistent container data & local volumes
+.data/
+postgres-data/
+node-a-data/
+node-b-data/
+prometheus-data/
+grafana-data/
+
+# Backup archives
+backup/node-a/*.sql.gz
+backup/node-a/*.tar.gz
+backup/node-a/*.sha256
+backup/node-b/*.sql.gz
+backup/node-b/*.tar.gz
+backup/node-b/*.sha256
+*.dump
+*.sql.bak
+
+# Logs & Temporary files
+*.log
+reconciliation-*.json
+reconciliation-*.csv
+tmp/
+.DS_Store
